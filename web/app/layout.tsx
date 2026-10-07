@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist } from "next/font/google";
 import { Nav } from "@/components/Nav";
+import { ServiceWorker } from "@/components/ServiceWorker";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full">
         <main className="mx-auto w-full max-w-xl px-4 pb-28 pt-6">{children}</main>
         <Nav />
+        <ServiceWorker />
       </body>
     </html>
   );

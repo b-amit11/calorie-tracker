@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#059669"/>
+  <!-- trackpad -->
+  <rect x="80" y="236" width="352" height="196" rx="30" fill="#ecfdf5"/>
+  <!-- bowl resting on the trackpad -->
+  <path d="M136 250 h200 a100 76 0 0 1 -200 0 z" fill="#ffffff" stroke="#d1fae5" stroke-width="6"/>
+  <!-- food -->
+  <circle cx="196" cy="234" r="30" fill="#fbbf24"/>
+  <circle cx="244" cy="222" r="36" fill="#f87171"/>
+  <circle cx="288" cy="238" r="26" fill="#34d399"/>
+  <!-- resting finger -->
+  <rect x="362" y="300" width="42" height="132" rx="21" fill="#a7f3d0"/>
+</svg>
