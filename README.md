@@ -1,40 +1,55 @@
 # Calorie tracker with a trackpad scale
 
-A personal MyFitnessPal-style app. You can weigh small portions of food on your MacBook's Force Touch trackpad.
+A personal calorie and macro tracker that can weigh small portions of food on a MacBook's Force Touch trackpad.
+
+## Features
+
+- Daily food diary by meal, with calorie and macro totals against goals
+- Food search across USDA FoodData Central and Open Food Facts, plus barcode lookup and custom foods
+- Live trackpad weighing to fill in portion sizes
+- Body-weight log and 30-day calorie chart
+
+## Structure
 
 ```
 calorie-tracker/
-├── scale-helper/   Swift: reads trackpad pressure, serves the weight on http://localhost:8787 (this Mac only)
+├── scale-helper/   Swift: reads trackpad pressure, serves the weight on http://localhost:8787
 └── web/            Next.js app + local SQLite database (web/calories.db)
 ```
 
-## Run it
+## Requirements
+
+- macOS 15+ on a Mac with a Force Touch trackpad
+- Swift 6.2+ (Xcode or Command Line Tools)
+- Node.js 24+
+
+## Running
 
 ```bash
-# terminal 1: the scale (only needed when you want to weigh food)
+# scale
 cd scale-helper && swift run
 
-# terminal 2: the app
-cd web && npm run dev        # open http://localhost:3000
+# app
+cd web && npm install && npm run dev   # http://localhost:3000
 ```
 
-## Weighing food
+## Using the scale
 
-1. Put a piece of paper or a light bowl on the trackpad. Never put food directly on the glass, and nothing wet or hot.
-2. Rest one finger lightly on the pad and keep it there. The trackpad only reports pressure while it feels a finger.
-3. Wait for "stable", which means it has zeroed itself. Then add food.
-4. In the app, press **Use … g**.
+1. Place a sheet of paper or a light container on the trackpad.
+2. Rest one finger on the pad. The trackpad only reports pressure while it detects a finger.
+3. Wait for the reading to show "stable" (it zeroes automatically), then add the food.
+4. In the app, press **Use … g** to fill in the amount.
 
-Keep it to small amounts. It's a trackpad, not a kitchen scale. To calibrate, go to **Settings → Trackpad scale** and weigh something you know the weight of.
+Calibration is under **Settings → Trackpad scale**.
 
-## Food data
+## Configuration
 
-- **USDA FoodData Central**: basic foods. It uses the shared `DEMO_KEY` by default, which is rate-limited.
-  You can get a free key at https://fdc.nal.usda.gov/api-key-signup and put it in `web/.env.local` as `USDA_API_KEY=...`.
-- **Open Food Facts**: branded products and barcode lookup. To look up a barcode, type its digits into the search box.
+| Variable | Where | Purpose |
+| --- | --- | --- |
+| `USDA_API_KEY` | `web/.env.local` | USDA FoodData Central key (defaults to the rate-limited `DEMO_KEY`) |
+| `DB_PATH` | `web/.env.local` | Location of the SQLite database |
+| `NEXT_PUBLIC_SCALE_URL` | `web/.env.local` | Scale helper URL (default `http://localhost:8787`) |
 
-## Notes
+## Credits
 
-- The scale uses Apple's private MultitouchSupport framework, through OpenMultitouchSupport.
-  A macOS update could break it.
-- There is no login. Don't expose the web app to the internet.
+Trackpad pressure is read via [OpenMultitouchSupport](https://github.com/Kyome22/OpenMultitouchSupport), which wraps Apple's private MultitouchSupport framework.
