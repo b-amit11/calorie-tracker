@@ -1,9 +1,13 @@
 "use client";
 
-import { scaleCommand, useScale } from "@/lib/use-scale";
+import { scaleCommand, useIsMac, useScale } from "@/lib/use-scale";
 
-/** Live trackpad-scale readout with Zero and "Use this weight" buttons. */
+/** Live trackpad-scale readout with Zero and "Use this weight" buttons. Only rendered on a Mac. */
 export function WeighPanel({ onUse }: { onUse: (grams: number) => void }) {
+  return useIsMac() ? <LiveScale onUse={onUse} /> : null;
+}
+
+function LiveScale({ onUse }: { onUse: (grams: number) => void }) {
   const scale = useScale();
 
   if (scale.status !== "live") {
@@ -13,9 +17,7 @@ export function WeighPanel({ onUse }: { onUse: (grams: number) => void }) {
           "Connecting to trackpad scale…"
         ) : (
           <>
-            Trackpad scale not running. On your Mac, run{" "}
-            <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1">swift run</code> in{" "}
-            <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1">scale-helper/</code>.
+            Trackpad scale not running. Start the <strong>Trackpad Scale</strong> menu-bar app to weigh food.
           </>
         )}
       </div>

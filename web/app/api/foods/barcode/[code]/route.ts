@@ -1,9 +1,15 @@
+import { authed } from "@/lib/api";
 import { lookupBarcode } from "@/lib/food-sources";
-import { findByBarcode } from "@/lib/repo";
+import { cacheCatalogFoods, findByBarcode } from "@/lib/repo";
+import { BadRequest, NotFound } from "@/lib/validate";
 
-export async function GET(_req: Request, ctx: RouteContext<"/api/foods/barcode/[code]">) {
-  const { code } = await ctx.params;
-  if (!/^\d{6,14}$/.test(code)) return Response.json({ error: "invalid barcode" }, { status: 400 });
-  const food = findByBarcode(code) ?? (await lookupBarcode(code).catch(() => null));
-  return food ? Response.json(food) : Response.json({ error: "not found" }, { status: 404 });
-}
+export const GET = authed<{ code: string }>(async (_req, { db, user }, { params }) => {
+  const { code } = await params;
+  if (!/^\d{6,14}$/.test(code)) throw new BadRequest("invalid barcode");
+  const local = await findByBarcode(db, user.id, code);
+  if (local) return Response.json(local);
+  const remote = await lookupBarcode(code).catch(() => null);
+  if (!remote) throw new NotFound("no product found for that barcode");
+  const [food] = await cacheCatalogFoods(db, [remote]);
+  return Response.json(food);
+});

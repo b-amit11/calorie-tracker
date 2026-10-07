@@ -1,13 +1,22 @@
 {
-  "name": "web",
+  "name": "calorie-tracker-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "barcode-detector": "^3.2.2",
+    "drizzle-orm": "^0.45.3",
     "next": "16.4.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
@@ -17,7 +26,13 @@
     "@types/node": "^24.19.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.11",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=22.12"
   }
 }

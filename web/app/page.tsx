@@ -1,18 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { AddFoodSheet } from "@/components/AddFoodSheet";
 import { Sheet } from "@/components/Sheet";
-import { MEALS, sum, todayISO, type Entry, type Goals, type Meal, type Nutrition } from "@/lib/types";
+import { api, flushQueue, onQueueChange, pendingEntries, type PendingEntry } from "@/lib/client";
+import { MEALS, scale, shiftDate, sum, todayISO, type Entry, type Goals, type Meal, type Nutrition } from "@/lib/types";
 
 type Day = { date: string; entries: Entry[]; totals: Nutrition; goals: Goals };
 
 const fmt = (n: number) => Math.round(n).toLocaleString();
 
-function shiftDate(iso: string, days: number) {
-  const d = new Date(`${iso}T12:00:00`);
-  d.setDate(d.getDate() + days);
-  return todayISO(d);
+const NO_PENDING: PendingEntry[] = [];
+let pendingSnapshot: PendingEntry[] = NO_PENDING;
+let pendingJson = "[]";
+/** Stable snapshot of the offline queue for useSyncExternalStore. */
+function getPending() {
+  const list = pendingEntries();
+  const json = JSON.stringify(list);
+  if (json !== pendingJson) { pendingJson = json; pendingSnapshot = list; }
+  return pendingSnapshot;
 }
 
 function dateLabel(iso: string) {
@@ -27,13 +33,31 @@ export default function Diary() {
   const [day, setDay] = useState<Day | null>(null);
   const [adding, setAdding] = useState<Meal | null>(null);
   const [editing, setEditing] = useState<Entry | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const allPending = useSyncExternalStore(onQueueChange, getPending, () => NO_PENDING);
+  const pending = allPending.filter((p) => p.date === date);
 
   const load = useCallback(async () => {
-    const res = await fetch(`/api/day?date=${date}`);
-    if (res.ok) setDay(await res.json());
+    try { setDay(await api<Day>(`/api/day?date=${date}`)); } catch { /* offline: keep what we have */ }
   }, [date]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Send anything logged offline as soon as we're back online.
+  useEffect(() => {
+    const sync = () => flushQueue().then((n) => { if (n) { setToast(`Synced ${n} offline ${n === 1 ? "entry" : "entries"}`); load(); } });
+    sync();
+    window.addEventListener("online", sync);
+    return () => window.removeEventListener("online", sync);
+  }, [load]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const totals = day ? sum([day.totals, ...pending.map((p) => scale(p.food, p.grams))]) : null;
 
   return (
     <div className="flex flex-col gap-5">
@@ -43,11 +67,12 @@ export default function Diary() {
         <button type="button" onClick={() => setDate(shiftDate(date, 1))} className="px-3 py-1 text-xl" aria-label="Next day">›</button>
       </div>
 
-      {day && <Summary totals={day.totals} goals={day.goals} />}
+      {day && totals && <Summary totals={totals} goals={day.goals} />}
 
       {MEALS.map((meal) => {
         const entries = day?.entries.filter((e) => e.meal === meal) ?? [];
-        const kcal = sum(entries.map((e) => e.totals)).kcal;
+        const queued = pending.filter((p) => p.meal === meal);
+        const kcal = sum([...entries.map((e) => e.totals), ...queued.map((p) => scale(p.food, p.grams))]).kcal;
         return (
           <section key={meal} className="rounded-2xl border border-zinc-200 dark:border-zinc-800">
             <header className="flex items-center justify-between px-4 pt-3">
@@ -68,6 +93,15 @@ export default function Diary() {
                   </button>
                 </li>
               ))}
+              {queued.map((p) => (
+                <li key={p.clientId} className="flex items-center justify-between gap-3 py-2.5 opacity-60">
+                  <span className="min-w-0">
+                    <span className="block truncate">{p.food.name}</span>
+                    <span className="text-xs text-amber-600">{fmt(p.grams)} g · waiting to sync</span>
+                  </span>
+                  <span className="shrink-0 tabular-nums">{fmt(scale(p.food, p.grams).kcal)}</span>
+                </li>
+              ))}
             </ul>
             <button type="button" onClick={() => setAdding(meal)} className="w-full px-4 py-3 text-left text-sm font-medium text-emerald-600">
               + Add food
@@ -81,11 +115,20 @@ export default function Diary() {
           date={date}
           meal={adding}
           onClose={() => setAdding(null)}
-          onAdded={() => { setAdding(null); load(); }}
+          onAdded={(result) => {
+            setAdding(null);
+            if (result === "queued") setToast("You're offline. Saved on this device and will sync later.");
+            load();
+          }}
         />
       )}
       {editing && (
         <EditEntrySheet entry={editing} onClose={() => setEditing(null)} onChanged={() => { setEditing(null); load(); }} />
+      )}
+      {toast && (
+        <div role="status" className="fixed inset-x-4 bottom-20 z-40 mx-auto max-w-md rounded-xl bg-zinc-900 px-4 py-3 text-sm text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-900">
+          {toast}
+        </div>
       )}
     </div>
   );
@@ -132,21 +175,21 @@ function Bar({ pct, over, thin }: { pct: number; over?: boolean; thin?: boolean 
 function EditEntrySheet({ entry, onClose, onChanged }: { entry: Entry; onClose: () => void; onChanged: () => void }) {
   const [grams, setGrams] = useState(String(entry.grams));
   const [meal, setMeal] = useState<Meal>(entry.meal);
+  const [error, setError] = useState<string | null>(null);
   const g = Number(grams);
+
+  async function run(fn: () => Promise<unknown>) {
+    setError(null);
+    try { await fn(); onChanged(); } catch (e) { setError((e as Error).message); }
+  }
 
   return (
     <Sheet title={entry.food.name} onClose={onClose}>
       <form
         className="flex flex-col gap-4"
-        onSubmit={async (e) => {
+        onSubmit={(e) => {
           e.preventDefault();
-          if (!(g > 0)) return;
-          await fetch(`/api/entries/${entry.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ grams: g, meal }),
-          });
-          onChanged();
+          if (g > 0) run(() => api(`/api/entries/${entry.id}`, { method: "PATCH", json: { grams: g, meal } }));
         }}
       >
         <label className="flex items-center gap-3">
@@ -165,10 +208,11 @@ function EditEntrySheet({ entry, onClose, onChanged }: { entry: Entry; onClose: 
             {MEALS.map((m) => <option key={m} value={m}>{m}</option>)}
           </select>
         </label>
+        {error && <p className="text-sm text-red-600">{error}</p>}
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={async () => { await fetch(`/api/entries/${entry.id}`, { method: "DELETE" }); onChanged(); }}
+            onClick={() => run(() => api(`/api/entries/${entry.id}`, { method: "DELETE" }))}
             className="rounded-xl border border-red-300 px-4 py-3 font-medium text-red-600 dark:border-red-900"
           >
             Delete

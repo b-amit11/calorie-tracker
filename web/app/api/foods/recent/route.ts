@@ -1,5 +1,4 @@
+import { authed } from "@/lib/api";
 import { recentFoods } from "@/lib/repo";
 
-export function GET() {
-  return Response.json(recentFoods());
-}
+export const GET = authed(async (_req, { db, user }) => Response.json(await recentFoods(db, user.id)));

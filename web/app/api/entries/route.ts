@@ -1,32 +1,21 @@
-import { addEntry, upsertFood } from "@/lib/repo";
-import type { Food } from "@/lib/types";
-import { BadRequest, date, handle, isMeal, num } from "@/lib/validate";
+import { authed } from "@/lib/api";
+import { addEntry, getFood } from "@/lib/repo";
+import { BadRequest, date, id, isMeal, jsonBody, num, NotFound } from "@/lib/validate";
 
-// Body: { date, meal, grams, weighed?, food: Food }  (food.id set if it already exists locally)
-export const POST = handle(async (req: Request) => {
-  const b = await req.json();
+// Body: { date, meal, foodId, grams, weighed?, clientId? }
+export const POST = authed(async (req, { db, user }) => {
+  const b = await jsonBody(req);
   if (!isMeal(b.meal)) throw new BadRequest("invalid meal");
-  const f = b.food as Food | undefined;
-  if (!f || typeof f.name !== "string" || !f.name.trim()) throw new BadRequest("invalid food");
-  const foodId = upsertFood({
-    id: f.id ? num(f.id, "food.id", { min: 1, max: Number.MAX_SAFE_INTEGER }) : undefined,
-    name: f.name.trim().slice(0, 200),
-    brand: f.brand?.slice(0, 100) ?? null,
-    barcode: f.barcode?.slice(0, 32) ?? null,
-    source: f.source === "usda" || f.source === "off" ? f.source : "custom",
-    source_id: f.source_id ?? null,
-    kcal: num(f.kcal, "kcal", { max: 1000 }),
-    protein: num(f.protein ?? 0, "protein", { max: 100 }),
-    carbs: num(f.carbs ?? 0, "carbs", { max: 100 }),
-    fat: num(f.fat ?? 0, "fat", { max: 100 }),
-    fiber: num(f.fiber ?? 0, "fiber", { max: 100 }),
-  });
-  const id = addEntry({
+  const entry = {
     date: date(b.date),
     meal: b.meal,
-    foodId,
+    foodId: id(b.foodId, "foodId"),
     grams: num(b.grams, "grams", { min: 0.1, max: 10_000 }),
-    weighed: !!b.weighed,
-  });
-  return Response.json({ id, foodId }, { status: 201 });
+    weighed: b.weighed === true,
+    clientId: typeof b.clientId === "string" && /^[\w-]{8,64}$/.test(b.clientId) ? b.clientId : undefined,
+  };
+  // Validate everything before touching the database; only the owner's or shared foods may be logged.
+  if (!(await getFood(db, user.id, entry.foodId))) throw new NotFound("food not found");
+  const res = await addEntry(db, user.id, entry);
+  return Response.json({ id: res.id }, { status: res.created ? 201 : 200 });
 });

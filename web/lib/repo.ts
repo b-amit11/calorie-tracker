@@ -1,124 +1,181 @@
-import { db } from "./db";
-import { DEFAULT_GOALS, scale, type Entry, type Food, type Goals, type Meal } from "./types";
+import { and, asc, desc, eq, gte, inArray, isNull, or, sql, type AnyColumn } from "drizzle-orm";
+import type { DB } from "./db";
+import { entries, foods, goals, weights } from "./db/schema";
+import { DEFAULT_GOALS, scale, type Entry, type Food, type Goals, type Meal, type NewFood } from "./types";
 
-type FoodRow = Food & { id: number };
+type FoodRow = typeof foods.$inferSelect;
 
-/** Insert a food (or return the existing row for the same source+id). */
-export function upsertFood(f: Food): number {
-  if (f.id) return f.id;
-  if (f.source !== "custom" && f.source_id) {
-    const existing = db()
-      .prepare("SELECT id FROM foods WHERE source = ? AND source_id = ?")
-      .get(f.source, f.source_id) as { id: number } | undefined;
-    if (existing) return existing.id;
-  }
-  const r = db()
-    .prepare(
-      `INSERT INTO foods (name, brand, barcode, source, source_id, kcal, protein, carbs, fat, fiber)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(f.name, f.brand ?? null, f.barcode ?? null, f.source, f.source_id ?? null,
-         f.kcal, f.protein, f.carbs, f.fat, f.fiber);
-  return Number(r.lastInsertRowid);
+export function toFood(r: FoodRow): Food {
+  return {
+    id: r.id, name: r.name, brand: r.brand, barcode: r.barcode, source: r.source, custom: r.ownerId !== null,
+    kcal: r.kcal, protein: r.protein, carbs: r.carbs, fat: r.fat, fiber: r.fiber,
+  };
 }
 
-export function searchLocalFoods(q: string): FoodRow[] {
-  return db()
-    .prepare(
-      `SELECT f.* FROM foods f
-       LEFT JOIN (SELECT food_id, COUNT(*) n, MAX(created_at) last FROM entries GROUP BY food_id) u ON u.food_id = f.id
-       WHERE f.name LIKE ? OR f.brand LIKE ? OR f.barcode = ?
-       ORDER BY COALESCE(u.n, 0) DESC, f.name LIMIT 15`,
-    )
-    .all(`%${q}%`, `%${q}%`, q) as FoodRow[];
+/** Case-insensitive substring match with LIKE wildcards in the input escaped. */
+const contains = (col: AnyColumn, q: string) => sql`${col} LIKE ${`%${q.replace(/[\\%_]/g, "\\$&")}%`} ESCAPE '\\'`;
+
+/** Foods a user may see/log: the shared catalog plus their own custom foods. */
+const visibleTo = (userId: string) => or(isNull(foods.ownerId), eq(foods.ownerId, userId));
+
+/**
+ * Cache foods fetched by the server from USDA / Open Food Facts into the shared catalog.
+ * Only server-side code calls this, so users can't inject nutrition data for catalog items.
+ */
+export async function cacheCatalogFoods(db: DB, list: NewFood[]): Promise<Food[]> {
+  if (!list.length) return [];
+  const rows = await db
+    .insert(foods)
+    .values(list.map((f) => ({ ...f, ownerId: null })))
+    .onConflictDoUpdate({
+      target: [foods.source, foods.sourceId],
+      set: {
+        name: sql`excluded.name`, brand: sql`excluded.brand`, barcode: sql`excluded.barcode`,
+        kcal: sql`excluded.kcal`, protein: sql`excluded.protein`, carbs: sql`excluded.carbs`,
+        fat: sql`excluded.fat`, fiber: sql`excluded.fiber`,
+      },
+    })
+    .returning();
+  return rows.map(toFood);
 }
 
-export function recentFoods(limit = 12): (FoodRow & { last_grams: number })[] {
-  return db()
-    .prepare(
-      `SELECT f.*, e.grams AS last_grams FROM foods f
-       JOIN entries e ON e.id = (SELECT id FROM entries WHERE food_id = f.id ORDER BY created_at DESC, id DESC LIMIT 1)
-       ORDER BY e.created_at DESC, e.id DESC LIMIT ?`,
-    )
-    .all(limit) as (FoodRow & { last_grams: number })[];
+export async function createCustomFood(db: DB, userId: string, f: Omit<NewFood, "source" | "sourceId">): Promise<Food> {
+  const [row] = await db.insert(foods).values({ ...f, source: "custom", ownerId: userId }).returning();
+  return toFood(row);
 }
 
-export function findByBarcode(code: string): FoodRow | undefined {
-  return db().prepare("SELECT * FROM foods WHERE barcode = ? LIMIT 1").get(code) as FoodRow | undefined;
+export async function getFood(db: DB, userId: string, id: number): Promise<Food | null> {
+  const row = await db.query.foods.findFirst({ where: and(eq(foods.id, id), visibleTo(userId)) });
+  return row ? toFood(row) : null;
 }
 
-type EntryRow = {
-  id: number; date: string; meal: Meal; grams: number; weighed: number;
-  food_id: number; name: string; brand: string | null; barcode: string | null;
-  source: Food["source"]; source_id: string | null;
-  kcal: number; protein: number; carbs: number; fat: number; fiber: number;
-};
+/** The user's own custom foods and catalog foods they've logged before, most used first. */
+export async function searchMyFoods(db: DB, userId: string, q: string): Promise<Food[]> {
+  const uses = db
+    .select({ foodId: entries.foodId, n: sql<number>`count(*)`.as("n") })
+    .from(entries)
+    .where(eq(entries.userId, userId))
+    .groupBy(entries.foodId)
+    .as("uses");
+  const rows = await db
+    .select({ food: foods })
+    .from(foods)
+    .leftJoin(uses, eq(uses.foodId, foods.id))
+    .where(and(
+      or(eq(foods.ownerId, userId), sql`${uses.n} > 0`),
+      or(contains(foods.name, q), contains(foods.brand, q), eq(foods.barcode, q)),
+    ))
+    .orderBy(desc(sql`coalesce(${uses.n}, 0)`), asc(foods.name))
+    .limit(15);
+  return rows.map((r) => toFood(r.food));
+}
 
-export function entriesForDate(date: string): Entry[] {
-  const rows = db()
-    .prepare(
-      `SELECT e.id, e.date, e.meal, e.grams, e.weighed, f.id AS food_id, f.name, f.brand, f.barcode,
-              f.source, f.source_id, f.kcal, f.protein, f.carbs, f.fat, f.fiber
-       FROM entries e JOIN foods f ON f.id = e.food_id
-       WHERE e.date = ? ORDER BY e.created_at, e.id`,
-    )
-    .all(date) as EntryRow[];
-  return rows.map((r) => {
-    const food: Food = {
-      id: r.food_id, name: r.name, brand: r.brand, barcode: r.barcode, source: r.source, source_id: r.source_id,
-      kcal: r.kcal, protein: r.protein, carbs: r.carbs, fat: r.fat, fiber: r.fiber,
-    };
-    return { id: r.id, date: r.date, meal: r.meal, grams: r.grams, weighed: !!r.weighed, food, totals: scale(food, r.grams) };
+export async function recentFoods(db: DB, userId: string, limit = 12): Promise<(Food & { lastGrams: number })[]> {
+  const latest = await db
+    .select({ foodId: entries.foodId, id: sql<number>`max(${entries.id})`.as("id") })
+    .from(entries)
+    .where(eq(entries.userId, userId))
+    .groupBy(entries.foodId)
+    .orderBy(desc(sql`max(${entries.id})`))
+    .limit(limit);
+  if (!latest.length) return [];
+  const rows = await db
+    .select({ food: foods, grams: entries.grams, id: entries.id })
+    .from(entries)
+    .innerJoin(foods, eq(foods.id, entries.foodId))
+    .where(inArray(entries.id, latest.map((l) => l.id)))
+    .orderBy(desc(entries.id));
+  return rows.map((r) => ({ ...toFood(r.food), lastGrams: r.grams }));
+}
+
+export async function findByBarcode(db: DB, userId: string, code: string): Promise<Food | null> {
+  const row = await db.query.foods.findFirst({ where: and(eq(foods.barcode, code), visibleTo(userId)) });
+  return row ? toFood(row) : null;
+}
+
+export async function entriesForDate(db: DB, userId: string, date: string): Promise<Entry[]> {
+  const rows = await db
+    .select({ e: entries, f: foods })
+    .from(entries)
+    .innerJoin(foods, eq(foods.id, entries.foodId))
+    .where(and(eq(entries.userId, userId), eq(entries.date, date)))
+    .orderBy(asc(entries.createdAt), asc(entries.id));
+  return rows.map(({ e, f }) => {
+    const food = toFood(f);
+    return { id: e.id, date: e.date, meal: e.meal, grams: e.grams, weighed: e.weighed, food, totals: scale(food, e.grams) };
   });
 }
 
-export function addEntry(e: { date: string; meal: Meal; foodId: number; grams: number; weighed: boolean }) {
-  const r = db()
-    .prepare("INSERT INTO entries (date, meal, food_id, grams, weighed) VALUES (?, ?, ?, ?, ?)")
-    .run(e.date, e.meal, e.foodId, e.grams, e.weighed ? 1 : 0);
-  return Number(r.lastInsertRowid);
+/** Idempotent on clientId: replaying the same offline entry returns the original id. */
+export async function addEntry(
+  db: DB,
+  userId: string,
+  e: { date: string; meal: Meal; foodId: number; grams: number; weighed: boolean; clientId?: string },
+): Promise<{ id: number; created: boolean }> {
+  const [row] = await db
+    .insert(entries)
+    .values({ ...e, userId, clientId: e.clientId ?? null })
+    .onConflictDoNothing({ target: [entries.userId, entries.clientId] })
+    .returning({ id: entries.id });
+  if (row) return { id: row.id, created: true };
+  const existing = await db.query.entries.findFirst({
+    where: and(eq(entries.userId, userId), eq(entries.clientId, e.clientId!)),
+  });
+  return { id: existing!.id, created: false };
 }
 
-export function updateEntry(id: number, patch: { grams?: number; meal?: Meal }) {
-  if (patch.grams != null) db().prepare("UPDATE entries SET grams = ? WHERE id = ?").run(patch.grams, id);
-  if (patch.meal) db().prepare("UPDATE entries SET meal = ? WHERE id = ?").run(patch.meal, id);
+/** Returns false when the entry doesn't exist or belongs to someone else. */
+export async function updateEntry(db: DB, userId: string, id: number, patch: { grams?: number; meal?: Meal }) {
+  if (patch.grams == null && !patch.meal) return true;
+  const res = await db
+    .update(entries)
+    .set({ ...(patch.grams != null && { grams: patch.grams }), ...(patch.meal && { meal: patch.meal }) })
+    .where(and(eq(entries.id, id), eq(entries.userId, userId)))
+    .returning({ id: entries.id });
+  return res.length > 0;
 }
 
-export function deleteEntry(id: number) {
-  db().prepare("DELETE FROM entries WHERE id = ?").run(id);
+export async function deleteEntry(db: DB, userId: string, id: number) {
+  const res = await db
+    .delete(entries)
+    .where(and(eq(entries.id, id), eq(entries.userId, userId)))
+    .returning({ id: entries.id });
+  return res.length > 0;
 }
 
-export function getGoals(): Goals {
-  const row = db().prepare("SELECT value FROM settings WHERE key = 'goals'").get() as { value: string } | undefined;
-  return row ? { ...DEFAULT_GOALS, ...JSON.parse(row.value) } : DEFAULT_GOALS;
+export async function getGoals(db: DB, userId: string): Promise<Goals> {
+  const row = await db.query.goals.findFirst({ where: eq(goals.userId, userId) });
+  return row ? { kcal: row.kcal, protein: row.protein, carbs: row.carbs, fat: row.fat } : DEFAULT_GOALS;
 }
 
-export function setGoals(g: Goals) {
-  db().prepare("INSERT INTO settings (key, value) VALUES ('goals', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-    .run(JSON.stringify(g));
+export async function setGoals(db: DB, userId: string, g: Goals) {
+  await db.insert(goals).values({ userId, ...g }).onConflictDoUpdate({ target: goals.userId, set: g });
 }
 
-export function listWeights(days = 365): { date: string; kg: number }[] {
-  return db()
-    .prepare("SELECT date, kg FROM weights WHERE date >= date('now', ?) ORDER BY date")
-    .all(`-${days} days`) as { date: string; kg: number }[];
+export async function listWeights(db: DB, userId: string, sinceDate: string) {
+  return db
+    .select({ date: weights.date, kg: weights.kg })
+    .from(weights)
+    .where(and(eq(weights.userId, userId), gte(weights.date, sinceDate)))
+    .orderBy(asc(weights.date));
 }
 
-export function setWeight(date: string, kg: number) {
-  db().prepare("INSERT INTO weights (date, kg) VALUES (?, ?) ON CONFLICT(date) DO UPDATE SET kg = excluded.kg").run(date, kg);
+export async function setWeight(db: DB, userId: string, date: string, kg: number) {
+  await db.insert(weights).values({ userId, date, kg }).onConflictDoUpdate({ target: [weights.userId, weights.date], set: { kg } });
 }
 
-export function deleteWeight(date: string) {
-  db().prepare("DELETE FROM weights WHERE date = ?").run(date);
+export async function deleteWeight(db: DB, userId: string, date: string) {
+  await db.delete(weights).where(and(eq(weights.userId, userId), eq(weights.date, date)));
 }
 
-/** Daily calorie totals for the trend chart. */
-export function dailyTotals(days = 30): { date: string; kcal: number }[] {
-  return db()
-    .prepare(
-      `SELECT e.date, SUM(f.kcal * e.grams / 100.0) AS kcal
-       FROM entries e JOIN foods f ON f.id = e.food_id
-       WHERE e.date >= date('now', ?) GROUP BY e.date ORDER BY e.date`,
-    )
-    .all(`-${days} days`) as { date: string; kcal: number }[];
+/** Daily calorie totals since a date, for the trend chart. */
+export async function dailyTotals(db: DB, userId: string, sinceDate: string) {
+  const rows = await db
+    .select({ date: entries.date, kcal: sql<number>`sum(${foods.kcal} * ${entries.grams} / 100.0)` })
+    .from(entries)
+    .innerJoin(foods, eq(foods.id, entries.foodId))
+    .where(and(eq(entries.userId, userId), gte(entries.date, sinceDate)))
+    .groupBy(entries.date)
+    .orderBy(asc(entries.date));
+  return rows.map((r) => ({ date: r.date, kcal: Number(r.kcal) }));
 }

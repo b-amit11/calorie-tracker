@@ -1,17 +1,19 @@
+import { authed } from "@/lib/api";
 import { deleteWeight, listWeights, setWeight } from "@/lib/repo";
-import { date, handle, num } from "@/lib/validate";
+import { date, jsonBody, num } from "@/lib/validate";
 
-export function GET() {
-  return Response.json(listWeights());
-}
+export const GET = authed(async (req, { db, user }) => {
+  const since = date(new URL(req.url).searchParams.get("since"));
+  return Response.json(await listWeights(db, user.id, since));
+});
 
-export const POST = handle(async (req: Request) => {
-  const b = await req.json();
-  setWeight(date(b.date), num(b.kg, "kg", { min: 20, max: 400 }));
+export const POST = authed(async (req, { db, user }) => {
+  const b = await jsonBody(req);
+  await setWeight(db, user.id, date(b.date), num(b.kg, "kg", { min: 20, max: 400 }));
   return Response.json({ ok: true });
 });
 
-export const DELETE = handle((req: Request) => {
-  deleteWeight(date(new URL(req.url).searchParams.get("date")));
+export const DELETE = authed(async (req, { db, user }) => {
+  await deleteWeight(db, user.id, date(new URL(req.url).searchParams.get("date")));
   return Response.json({ ok: true });
 });

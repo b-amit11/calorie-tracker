@@ -20,6 +20,15 @@ export type ScaleState =
   | { status: "offline" }
   | { status: "live"; reading: ScaleReading };
 
+/** The trackpad scale only exists on a Mac (not an iPad, which also reports "Macintosh"). */
+export function useIsMac() {
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    setIsMac(/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints === 0);
+  }, []);
+  return isMac;
+}
+
 export function useScale(enabled = true): ScaleState {
   const [state, setState] = useState<ScaleState>({ status: "connecting" });
 

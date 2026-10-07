@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { todayISO, type Goals } from "@/lib/types";
+import { api } from "@/lib/client";
+import { shiftDate, todayISO, type Goals } from "@/lib/types";
 
 type Point = { date: string; value: number };
 
@@ -12,11 +13,15 @@ export default function Progress() {
   const [date, setDate] = useState(todayISO);
 
   const load = useCallback(async () => {
-    const [w, s] = await Promise.all([fetch("/api/weights").then((r) => r.json()), fetch("/api/stats").then((r) => r.json())]);
+    const today = todayISO();
+    const [w, s] = await Promise.all([
+      api<{ date: string; kg: number }[]>(`/api/weights?since=${shiftDate(today, -365)}`),
+      api<{ days: { date: string; kcal: number }[]; goals: Goals }>(`/api/stats?since=${shiftDate(today, -29)}`),
+    ]);
     setWeights(w);
     setStats(s);
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load().catch(() => {}); }, [load]);
 
   const latest = weights.at(-1);
   const avg = stats?.days.length ? stats.days.reduce((a, d) => a + d.kcal, 0) / stats.days.length : 0;
@@ -37,9 +42,9 @@ export default function Progress() {
             e.preventDefault();
             const n = Number(kg);
             if (!(n > 0)) return;
-            await fetch("/api/weights", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date, kg: n }) });
+            await api("/api/weights", { method: "POST", json: { date, kg: n } });
             setKg("");
-            load();
+            await load();
           }}
         >
           <input type="date" value={date} max={todayISO()} onChange={(e) => setDate(e.target.value)}

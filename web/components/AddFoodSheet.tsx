@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { api, ApiError, logEntry } from "@/lib/client";
 import { scale, type Food, type Meal } from "@/lib/types";
+import { BarcodeScanner } from "./BarcodeScanner";
 import { WeighPanel } from "./WeighPanel";
 import { Sheet } from "./Sheet";
 
-type Results = { local: Food[]; usda: Food[]; off: Food[] };
-type Recent = Food & { last_grams: number };
+type Results = { mine: Food[]; usda: Food[]; off: Food[] };
+type Recent = Food & { lastGrams: number };
 
 const fmt = (n: number) => Math.round(n).toLocaleString();
 
@@ -19,7 +21,7 @@ export function AddFoodSheet({
   date: string;
   meal: Meal;
   onClose: () => void;
-  onAdded: () => void;
+  onAdded: (result: "saved" | "queued") => void;
 }) {
   const [picked, setPicked] = useState<{ food: Food; grams?: number } | null>(null);
   const [custom, setCustom] = useState(false);
@@ -32,13 +34,7 @@ export function AddFoodSheet({
           initialGrams={picked.grams}
           onBack={() => setPicked(null)}
           onSave={async (grams, weighed) => {
-            const res = await fetch("/api/entries", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ date, meal, grams, weighed, food: picked.food }),
-            });
-            if (!res.ok) throw new Error((await res.json()).error ?? "Could not save");
-            onAdded();
+            onAdded(await logEntry({ date, meal, grams, weighed, food: picked.food }));
           }}
         />
       ) : custom ? (
@@ -56,10 +52,23 @@ function SearchStep({ onPick, onCustom }: { onPick: (f: Food, grams?: number) =>
   const [recent, setRecent] = useState<Recent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
-    fetch("/api/foods/recent").then((r) => r.json()).then(setRecent).catch(() => {});
+    api<Recent[]>("/api/foods/recent").then(setRecent).catch(() => {});
   }, []);
+
+  async function lookup(code: string, signal?: AbortSignal) {
+    try {
+      const food = await api<Food>(`/api/foods/barcode/${code}`, { signal });
+      setResults({ mine: [], usda: [], off: [food] });
+      return food;
+    } catch (e) {
+      setResults({ mine: [], usda: [], off: [] });
+      setError(e instanceof ApiError ? e.message : "Lookup failed. Check your connection.");
+      return null;
+    }
+  }
 
   useEffect(() => {
     const term = q.trim();
@@ -70,13 +79,9 @@ function SearchStep({ onPick, onCustom }: { onPick: (f: Food, grams?: number) =>
       setError(null);
       try {
         if (/^\d{8,14}$/.test(term)) {
-          // Looks like a barcode.
-          const res = await fetch(`/api/foods/barcode/${term}`, { signal: ctrl.signal });
-          if (res.ok) setResults({ local: [], usda: [], off: [await res.json()] });
-          else { setResults({ local: [], usda: [], off: [] }); setError("No product found for that barcode."); }
+          await lookup(term, ctrl.signal); // looks like a barcode
         } else {
-          const res = await fetch(`/api/foods/search?q=${encodeURIComponent(term)}`, { signal: ctrl.signal });
-          setResults(await res.json());
+          setResults(await api<Results>(`/api/foods/search?q=${encodeURIComponent(term)}`, { signal: ctrl.signal }));
         }
       } catch (e) {
         if ((e as Error).name !== "AbortError") setError("Search failed. Check your connection.");
@@ -87,26 +92,50 @@ function SearchStep({ onPick, onCustom }: { onPick: (f: Food, grams?: number) =>
     return () => { clearTimeout(t); ctrl.abort(); };
   }, [q]);
 
-  const empty = results && !results.local.length && !results.usda.length && !results.off.length;
+  const empty = results && !results.mine.length && !results.usda.length && !results.off.length;
+
+  if (scanning) {
+    return (
+      <BarcodeScanner
+        onCancel={() => setScanning(false)}
+        onCode={async (code) => {
+          setScanning(false);
+          setQ(code);
+          const food = await lookup(code);
+          if (food) onPick(food);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4">
-      <input
-        autoFocus
-        value={q}
-        onChange={(e) => setQ(e.target.value)}
-        placeholder="Search foods or type a barcode"
-        className="w-full rounded-xl border border-zinc-300 dark:border-zinc-700 bg-transparent px-4 py-3 outline-none focus:border-emerald-500"
-      />
+      <div className="flex gap-2">
+        <input
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search foods or type a barcode"
+          className="min-w-0 flex-1 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-transparent px-4 py-3 outline-none focus:border-emerald-500"
+        />
+        <button
+          type="button"
+          onClick={() => { setError(null); setScanning(true); }}
+          aria-label="Scan barcode"
+          className="rounded-xl border border-zinc-300 px-4 text-sm font-medium dark:border-zinc-700"
+        >
+          Scan
+        </button>
+      </div>
       {loading && <p className="text-sm text-zinc-500">Searching…</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
       {!results && recent.length > 0 && (
-        <FoodList title="Recent" foods={recent} onPick={(f) => onPick(f, (f as Recent).last_grams)} />
+        <FoodList title="Recent" foods={recent} onPick={(f) => onPick(f, (f as Recent).lastGrams)} />
       )}
       {results && (
         <>
-          <FoodList title="My foods" foods={results.local} onPick={onPick} />
+          <FoodList title="My foods" foods={results.mine} onPick={onPick} />
           <FoodList title="Basic foods · USDA" foods={results.usda} onPick={onPick} />
           <FoodList title="Brands · Open Food Facts" foods={results.off} onPick={onPick} />
           {empty && !loading && !error && <p className="text-sm text-zinc-500">No matches.</p>}
@@ -127,7 +156,7 @@ function FoodList({ title, foods, onPick }: { title: string; foods: Food[]; onPi
       <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">{title}</h3>
       <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
         {foods.map((f) => (
-          <li key={`${f.source}:${f.source_id ?? f.id}`}>
+          <li key={f.id}>
             <button type="button" onClick={() => onPick(f)} className="flex w-full items-center justify-between gap-3 py-2.5 text-left">
               <span className="min-w-0">
                 <span className="block truncate">{f.name}</span>
@@ -219,6 +248,7 @@ function AmountStep({
 }
 
 function CustomFoodStep({ onBack, onDone }: { onBack: () => void; onDone: (f: Food) => void }) {
+  const [error, setError] = useState<string | null>(null);
   const [v, setV] = useState({ name: "", brand: "", kcal: "", protein: "", carbs: "", fat: "", fiber: "" });
   const set = (k: keyof typeof v) => (e: React.ChangeEvent<HTMLInputElement>) => setV({ ...v, [k]: e.target.value });
   const numOr0 = (s: string) => (s.trim() === "" ? 0 : Number(s));
@@ -228,13 +258,21 @@ function CustomFoodStep({ onBack, onDone }: { onBack: () => void; onDone: (f: Fo
   return (
     <form
       className="flex flex-col gap-3"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault();
         if (!valid) return;
-        onDone({
-          name: v.name.trim(), brand: v.brand.trim() || null, source: "custom",
-          kcal: numOr0(v.kcal), protein: numOr0(v.protein), carbs: numOr0(v.carbs), fat: numOr0(v.fat), fiber: numOr0(v.fiber),
-        });
+        setError(null);
+        try {
+          onDone(await api<Food>("/api/foods", {
+            method: "POST",
+            json: {
+              name: v.name.trim(), brand: v.brand.trim() || null,
+              kcal: numOr0(v.kcal), protein: numOr0(v.protein), carbs: numOr0(v.carbs), fat: numOr0(v.fat), fiber: numOr0(v.fiber),
+            },
+          }));
+        } catch (err) {
+          setError((err as Error).message);
+        }
       }}
     >
       <button type="button" onClick={onBack} className="self-start text-sm text-zinc-500">← Back</button>
@@ -248,6 +286,7 @@ function CustomFoodStep({ onBack, onDone }: { onBack: () => void; onDone: (f: Fo
         <input className={field} inputMode="decimal" placeholder="Fat (g)" value={v.fat} onChange={set("fat")} />
         <input className={field} inputMode="decimal" placeholder="Fiber (g)" value={v.fiber} onChange={set("fiber")} />
       </div>
+      {error && <p className="text-sm text-red-600">{error}</p>}
       <button disabled={!valid} className="rounded-xl bg-emerald-600 py-3 font-medium text-white disabled:opacity-40">
         Next
       </button>
