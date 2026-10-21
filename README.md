@@ -102,3 +102,7 @@ To use the trackpad scale with the deployed site, add its URL under **Trackpad S
 ## Credits
 
 Trackpad access: [OpenMultitouchSupport](https://github.com/Kyome22/OpenMultitouchSupport). Using the trackpad as a scale was inspired by [TrackWeight](https://github.com/KrishKrosh/TrackWeight). Food data: [USDA FoodData Central](https://fdc.nal.usda.gov) and [Open Food Facts](https://world.openfoodfacts.org) (ODbL).
+
+## License
+
+[MIT](LICENSE). Food data from Open Food Facts is licensed separately under the ODbL.
